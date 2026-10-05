@@ -4,21 +4,21 @@
 //   dxtcl_monitor.exe --pid <pid>
 //
 // Waits until a process with that exe name runs (or takes the given pid), starts a real-time ETW
-// session that feeds the library (etw_session.cpp), and once per second prints what the library's
-// callbacks have reported so far: for the objects named RT_<index>, whether the library
+// session that feeds the library (etw_session.cpp), and once per second prints one line of what the
+// library's callbacks have reported so far: for the objects named RT_<index>, whether the library
 // has them in video memory (Local), in system memory (NonLocal) or doesn't know (Unknown), and
-// whether OnDemotedAllocations has named them. The format matches the vramtiming test app, which
-// measures the same thing with GPU timing, so the two outputs can be compared line by line.
-// Runs until the target exits (or Ctrl+C), then prints a final report.
+// whether OnDemotedAllocations has named them, plus a few counters (see README.md). vramtiming
+// measures the same thing with GPU timing. Runs until the target exits (or Ctrl+C), then prints a
+// final report.
 
 #include <windows.h>
 #include <tlhelp32.h>
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
-#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -36,7 +36,7 @@ namespace
 // The library's callbacks, and what they have reported so far
 // ------------------------------------------------------------------------------------------------
 
-struct TrackedObject // a resource or a heap
+struct TrackedObject // a committed or placed resource
 {
     std::wstring name;
     UINT64 bytes = 0;
@@ -49,20 +49,19 @@ struct TrackedObject // a resource or a heap
 // (a counter each, unique and non-zero).
 class LibraryListener final : public NoOpApiObjectCallbacks,
                               public NoOpPixCounterCallbacks,
-                              public ResidencyEventCallbacks,
+                              public NoOpResidencyEventCallbacks,
                               public DiagnosticsSink
 {
 public:
     explicit LibraryListener(DWORD targetPid) : m_targetPid(targetPid) {}
 
     std::mutex mutex;
-    std::unordered_map<UINT64, TrackedObject> objects; // live resources and heaps, by object id
+    std::unordered_map<UINT64, TrackedObject> objects; // live resources, by object id
     std::map<std::wstring, double> counters;           // latest value of each memory counter of the target, in MB (10^6 bytes)
-    UINT64 residencyOps[4] = {};                       // indexed by ResidencyOperationType
+    UINT64 pageIns = 0, pageOuts = 0;                  // PageIn / PageOut residency operations so far
     UINT64 segmentGroupChanges = 0;
-    UINT64 migrations = 0;
 
-    // ---- ApiObjectCallbacks: resources and heaps ----
+    // ---- ApiObjectCallbacks: resources (vramtiming's RT_<index> objects are committed resources) ----
 
     HRESULT OnCommittedResourceCreation(INT64 time, UINT64 device, UINT32 pid, UINT32 tid, const D3D12_RESOURCE_DESC* desc,
         const ObjectPlacementInfo* placement, const D3D12_HEAP_PROPERTIES* heapProperties, D3D12_HEAP_FLAGS heapFlags,
@@ -77,22 +76,6 @@ public:
         const ObjectPlacementInfo* placement, UINT64* objectId) override
     {
         NoOpApiObjectCallbacks::OnPlacedResourceCreation(time, device, pid, tid, desc, placement, objectId);
-        Add(*objectId, placement);
-        return S_OK;
-    }
-
-    HRESULT OnReservedResourceCreation(INT64 time, UINT64 device, UINT32 pid, UINT32 tid, const D3D12_RESOURCE_DESC* desc,
-        const ReservedResourceInfo* reserved, UINT64* objectId) override
-    {
-        NoOpApiObjectCallbacks::OnReservedResourceCreation(time, device, pid, tid, desc, reserved, objectId);
-        Add(*objectId, nullptr); // no memory of its own (tiles are mapped from heaps)
-        return S_OK;
-    }
-
-    HRESULT OnHeapCreation(INT64 time, UINT64 device, UINT32 pid, UINT32 tid, const D3D12_HEAP_DESC* desc,
-        const ObjectPlacementInfo* placement, UINT64* objectId) override
-    {
-        NoOpApiObjectCallbacks::OnHeapCreation(time, device, pid, tid, desc, placement, objectId);
         Add(*objectId, placement);
         return S_OK;
     }
@@ -140,20 +123,12 @@ public:
     HRESULT OnResidencyOperation(const ResidencyOperation* operation) override
     {
         std::lock_guard lock(mutex);
-        const size_t type = static_cast<size_t>(operation->OperationType);
-        if (type < 4)
-            ++residencyOps[type];
+        pageIns += operation->OperationType == ResidencyOperationType::PageIn;
+        pageOuts += operation->OperationType == ResidencyOperationType::PageOut;
         return S_OK;
     }
 
-    HRESULT OnAllocationMigrations(const AllocationMigration*, UINT32 count) override
-    {
-        std::lock_guard lock(mutex);
-        migrations += count;
-        return S_OK;
-    }
-
-    // ---- PixCounterCallbacks: the library reports per-process memory counters ("Local Budget",
+    // ---- PixCounterCallbacks: the library reports per-process memory counters ("Local Resident",
     //      "Non-Local Resident", "High Priority", ...) through these, one counter group per adapter. ----
 
     HRESULT OnPixCounterInfo(UINT64 groupId, UINT32 processId, PCWSTR name, PCWSTR description, PCWSTR units, CounterFlags flags,
@@ -182,9 +157,13 @@ public:
 
     void OnDiagnostic(DiagnosticSeverity severity, DiagnosticCode code, std::wstring_view message) override
     {
+        char line[161]; // clipped to 160 characters, like every other output line
+        const int length = snprintf(line, sizeof(line), "  library diagnostic (%s, code %d): %.*ls",
+            severity == DiagnosticSeverity::Error ? "error" : "warning", static_cast<int>(code), static_cast<int>(message.size()), message.data());
+        if (length >= static_cast<int>(sizeof(line)))
+            memcpy(line + sizeof(line) - 4, "...", 4);
         std::lock_guard lock(mutex);
-        printf("  library diagnostic (%s, code %d): %.*ls\n", severity == DiagnosticSeverity::Error ? "error" : "warning",
-            static_cast<int>(code), static_cast<int>(message.size()), message.data());
+        printf("%s\n", line);
     }
 
 private:
@@ -192,11 +171,8 @@ private:
     {
         std::lock_guard lock(mutex);
         TrackedObject& object = objects[objectId];
-        if (placement)
-        {
-            object.bytes = placement->GpuVirtualSize;
-            object.group = placement->ResidentSegmentGroup; // often Unknown at creation
-        }
+        object.bytes = placement->GpuVirtualSize;
+        object.group = placement->ResidentSegmentGroup; // often Unknown at creation
     }
 
     TrackedObject* Find(UINT64 objectId)
@@ -213,68 +189,15 @@ private:
 // The report
 // ------------------------------------------------------------------------------------------------
 
-enum Location { Vram, SystemMemory, UnknownLocation, LocationCount };
-
-Location ToLocation(MemorySegmentGroup group)
-{
-    switch (group)
-    {
-    case MemorySegmentGroup::Local:    return Vram;
-    case MemorySegmentGroup::NonLocal: return SystemMemory;
-    default:                           return UnknownLocation;
-    }
-}
-
-// Object counts and sizes per location, plus the objects flagged as demoted.
-struct Totals
-{
-    UINT64 count[LocationCount] = {};
-    UINT64 bytes[LocationCount] = {};
-    UINT64 demotedCount = 0;
-    UINT64 demotedBytes = 0;
-
-    void Add(const TrackedObject& object)
-    {
-        const Location location = ToLocation(object.group);
-        ++count[location];
-        bytes[location] += object.bytes;
-        if (object.demoted)
-        {
-            ++demotedCount;
-            demotedBytes += object.bytes;
-        }
-    }
-};
-
 UINT64 MiB(UINT64 bytes) { return bytes >> 20; } // "MB" in the output means MiB, as in vramtiming
 
-// "RT_123" -> 123. False for any other name.
-bool ParseRtIndex(const std::wstring& name, UINT32* index)
+// True for "RT_<digits>" (vramtiming's render targets), false for any other name.
+bool IsRtName(const std::wstring& name)
 {
-    if (name.compare(0, 3, L"RT_") != 0 || name.size() == 3)
-        return false;
-    wchar_t* end = nullptr;
-    *index = wcstoul(name.c_str() + 3, &end, 10);
-    return *end == L'\0';
+    return name.size() > 3 && name.compare(0, 3, L"RT_") == 0 && name.find_first_not_of(L"0123456789", 3) == std::wstring::npos;
 }
 
-// {0,1,2,3,7,9,10} -> "0-3, 7, 9-10" (the same format vramtiming uses). "none" if empty.
-std::string FormatRanges(const std::set<UINT32>& indices)
-{
-    std::string text;
-    for (auto it = indices.begin(); it != indices.end();)
-    {
-        const UINT32 first = *it;
-        UINT32 last = first;
-        while (++it != indices.end() && *it == last + 1)
-            last = *it;
-        text += text.empty() ? "" : ", ";
-        text += last == first ? std::to_string(first) : std::to_string(first) + "-" + std::to_string(last);
-    }
-    return text.empty() ? "none" : text;
-}
-
-// Sum of the named counters in MiB (the library reports MB = 10^6 bytes), or "n/a" if none was reported yet.
+// Sum of the named counters in MiB (the library reports MB = 10^6 bytes), or "-" if none was reported yet.
 std::string CounterMiB(const std::map<std::wstring, double>& counters, std::initializer_list<const wchar_t*> names)
 {
     double sum = 0;
@@ -288,65 +211,37 @@ std::string CounterMiB(const std::map<std::wstring, double>& counters, std::init
             seen = true;
         }
     }
-    return seen ? std::to_string(static_cast<UINT64>(sum * 1e6 / (1024.0 * 1024.0) + 0.5)) : "n/a";
+    return seen ? std::to_string(static_cast<UINT64>(sum * 1e6 / (1024.0 * 1024.0) + 0.5)) : "-";
 }
 
-// The range lines printed last time; a range line is only printed again when it changes.
-struct PrintedRanges
-{
-    std::string systemMemory, demoted, unknown;
-};
-
-void PrintIfChanged(const char* label, const std::set<UINT32>& indices, std::string& previous)
-{
-    std::string text = FormatRanges(indices);
-    if (text != previous)
-        printf("  library %s: %s\n", label, text.c_str());
-    previous = text;
-}
-
-void PrintReport(LibraryListener& library, const std::string& when, PrintedRanges& printed)
+// The one report line.
+void PrintReport(LibraryListener& library, const char* when)
 {
     std::lock_guard lock(library.mutex);
 
-    Totals rt, all;
-    std::set<UINT32> rtInSystemMemory, rtDemoted, rtUnknown;
+    enum { Vram, Sys, Unk, Dem };
+    UINT64 count[4] = {}, bytes[4] = {};
     for (const auto& [id, object] : library.objects)
     {
-        all.Add(object);
-
-        UINT32 index = 0;
-        if (!ParseRtIndex(object.name, &index))
+        if (!IsRtName(object.name))
             continue;
-        rt.Add(object);
-        if (ToLocation(object.group) == SystemMemory)
-            rtInSystemMemory.insert(index);
-        if (ToLocation(object.group) == UnknownLocation)
-            rtUnknown.insert(index);
+        const int location = object.group == MemorySegmentGroup::Local ? Vram : object.group == MemorySegmentGroup::NonLocal ? Sys : Unk;
+        ++count[location];
+        bytes[location] += object.bytes;
         if (object.demoted)
-            rtDemoted.insert(index);
+        {
+            ++count[Dem];
+            bytes[Dem] += object.bytes;
+        }
     }
 
-    printf("%s  RT_* objects (library): VRAM %llu MB [%llu] | system memory %llu MB [%llu] | unknown %llu MB [%llu] | flagged demoted %llu MB [%llu]\n",
-        when.c_str(), MiB(rt.bytes[Vram]), rt.count[Vram], MiB(rt.bytes[SystemMemory]), rt.count[SystemMemory],
-        MiB(rt.bytes[UnknownLocation]), rt.count[UnknownLocation], MiB(rt.demotedBytes), rt.demotedCount);
-
-    PrintIfChanged("system memory", rtInSystemMemory, printed.systemMemory);
-    PrintIfChanged("demoted", rtDemoted, printed.demoted);
-    PrintIfChanged("unknown", rtUnknown, printed.unknown);
-
     const auto& counters = library.counters;
-    printf("  library counters (MB): Local Budget %s | Local Resident %s | Non-Local Resident %s | demoted (Minimum..Maximum Priority) %s\n",
-        CounterMiB(counters, { L"Local Budget" }).c_str(), CounterMiB(counters, { L"Local Resident" }).c_str(),
-        CounterMiB(counters, { L"Non-Local Resident" }).c_str(),
-        CounterMiB(counters, { L"Minimum Priority", L"Low Priority", L"Normal Priority", L"High Priority", L"Maximum Priority" }).c_str());
-
-    // Note: a placed resource's bytes are also part of its heap's bytes.
-    const UINT64* ops = library.residencyOps;
-    printf("  all resources+heaps (library): VRAM %llu MB [%llu] | system memory %llu MB [%llu] | unknown %llu MB [%llu] | "
-           "MakeResident %llu, Evict %llu, PageIn %llu, PageOut %llu, segment-group changes %llu, migrations %llu\n",
-        MiB(all.bytes[Vram]), all.count[Vram], MiB(all.bytes[SystemMemory]), all.count[SystemMemory], MiB(all.bytes[UnknownLocation]),
-        all.count[UnknownLocation], ops[0], ops[1], ops[2], ops[3], library.segmentGroupChanges, library.migrations);
+    printf("%s  RT vram %lluMB/%llu sys %lluMB/%llu unk %lluMB/%llu dem %lluMB/%llu | ctr vramRes %s sysRes %s dem %s MB | "
+           "pgIn %llu pgOut %llu segChg %llu\n",
+        when, MiB(bytes[Vram]), count[Vram], MiB(bytes[Sys]), count[Sys], MiB(bytes[Unk]), count[Unk], MiB(bytes[Dem]), count[Dem],
+        CounterMiB(counters, { L"Local Resident" }).c_str(), CounterMiB(counters, { L"Non-Local Resident" }).c_str(),
+        CounterMiB(counters, { L"Minimum Priority", L"Low Priority", L"Normal Priority", L"High Priority", L"Maximum Priority" }).c_str(),
+        library.pageIns, library.pageOuts, library.segmentGroupChanges);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -425,7 +320,6 @@ int wmain(int argc, wchar_t** argv)
     LibraryListener library(pid);
     DxTimingCaptureLibraryOptions options;
     options.TrackApiObjects = true;
-    options.TrackGpuTiming = true; // the library only reports OnAllocationMigrations when this is set
     DxTimingCaptureEventCallbacks callbacks;
     callbacks.ApiObjectCallbacks = &library;
     callbacks.ResidencyEventCallbacks = &library;
@@ -440,20 +334,21 @@ int wmain(int argc, wchar_t** argv)
     SetConsoleCtrlHandler(OnCtrlC, TRUE);
     printf("dxtcl_monitor: attached to %ls (pid %lu), ETW session running\n", name, pid);
 
-    PrintedRanges printed;
+    ULONG printedLost = 0;
     const ULONGLONG start = GetTickCount64();
     while (!g_ctrlC && WaitForSingleObject(target, 1000) == WAIT_TIMEOUT)
     {
-        PrintReport(library, "t=" + std::to_string((GetTickCount64() - start + 500) / 1000) + "s", printed);
-        if (const ULONG lost = session.EventsLost())
+        PrintReport(library, ("t=" + std::to_string((GetTickCount64() - start + 500) / 1000) + "s").c_str());
+        const ULONG lost = session.EventsLost();
+        if (lost != printedLost) // printed when the count grows, not every second
             printf("  WARNING: the ETW session has lost %lu events so far, the library's data is incomplete\n", lost);
+        printedLost = lost;
     }
 
     printf("\ndxtcl_monitor: %s, stopping the ETW session\n", g_ctrlC ? "Ctrl+C" : "target exited");
-    session.Stop(); // delivers the remaining events, then calls OnDataComplete
+    session.Stop(); // delivers the remaining events, then calls OnDataComplete; prints the session statistics
 
-    printed = {}; // print all range lines in the final report
-    PrintReport(library, "final", printed);
+    PrintReport(library, "final");
 
     CloseHandle(target);
     return 0;
