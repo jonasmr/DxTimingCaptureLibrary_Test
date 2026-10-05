@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  dxtcl_monitor.exe: main.cpp + etw_session.cpp, compiled together with DxTimingCaptureLibrary's own
+  sources taken unmodified from the submodule.
+
+  (The library's lib\DxTimingCaptureLibrary.lib.vcxproj is not referenced because it writes its
+  intermediate files into the submodule. Compiling its four .cpp files here, with the same settings,
+  keeps every build artifact under build\.)
+-->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{D939C0B3-D128-4106-B5FD-283450208265}</ProjectGuid>
+    <RootNamespace>dxtcl_monitor</RootNamespace>
+    <ConfigurationType>Application</ConfigurationType>
+  </PropertyGroup>
+
+  <!-- The library's standalone build settings, unchanged: x64 Debug/Release configurations, toolset,
+       Windows SDK, C++20, include directories (include\, third_party\dxgk, third_party\directstorage),
+       link libraries, and the Microsoft.Direct3D.D3D12 NuGet package (d3d12.h, D3D12Events.h).
+       Must come after ConfigurationType and before Microsoft.Cpp.Default.props. -->
+  <Import Project="DxTimingCaptureLibrary\Directory.Build.props" />
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <!-- The library's public headers also need the PixEventDecoder headers. -->
+      <AdditionalIncludeDirectories>$(PixEventDecoderPath)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- Emitted by the library's own sources (<codecvt> deprecation, constant truncation). -->
+      <DisableSpecificWarnings>4996;4309;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Condition="'$(Configuration)' == 'Release'">
+      <Optimization>MaxSpeed</Optimization>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="etw_session.cpp" />
+    <ClInclude Include="etw_session.h" />
+  </ItemGroup>
+
+  <!-- DxTimingCaptureLibrary (same sources as its lib\DxTimingCaptureLibrary.lib.vcxproj). -->
+  <ItemGroup>
+    <ClCompile Include="$(DxTimingCaptureLibraryRoot)\lib\AllocationTracker.cpp" />
+    <ClCompile Include="$(DxTimingCaptureLibraryRoot)\lib\D3D12ObjectProcessor.cpp" />
+    <ClCompile Include="$(DxTimingCaptureLibraryRoot)\lib\DxTimingCaptureEventHandler.cpp" />
+    <ClCompile Include="$(DxTimingCaptureLibraryRoot)\lib\PixEventDecoderStub.cpp" Condition="'$(UseStubPixEventDecoder)' == 'true'" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

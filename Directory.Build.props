@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto-imported by MSBuild for dxtcl_monitor.vcxproj.
+
+  Every build artifact (binaries, intermediates, NuGet restore output) goes to build\ next to this
+  file, never into the DxTimingCaptureLibrary submodule.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <BuildDir>$(MSBuildThisFileDirectory)build\</BuildDir>
+    <BaseIntermediateOutputPath>$(BuildDir)obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <IntDir>$(BuildDir)obj\$(MSBuildProjectName)\$(Configuration)\</IntDir>
+    <OutDir>$(BuildDir)bin\$(Configuration)\</OutDir>
+
+    <!-- The Microsoft.Direct3D.D3D12 PackageReference (from the library's props) is consumed through its
+         build\native .props/.targets, which restore imports. ResolveNuGetPackageAssets resolves managed
+         assemblies only and fails on C++ projects with "Sequence contains no elements", so turn it off. -->
+    <ResolveNuGetPackages>false</ResolveNuGetPackages>
+
+    <!-- No vcpkg, even if an enclosing folder has a vcpkg.json. -->
+    <VcpkgEnabled>false</VcpkgEnabled>
+    <VcpkgEnableManifest>false</VcpkgEnableManifest>
+  </PropertyGroup>
+</Project>
