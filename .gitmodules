@@ -1,0 +1,3 @@
+[submodule "DxTimingCaptureLibrary"]
+	path = DxTimingCaptureLibrary
+	url = git@github.com:microsoft/DxTimingCaptureLibrary.git
