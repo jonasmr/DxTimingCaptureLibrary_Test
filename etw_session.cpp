@@ -37,7 +37,11 @@ bool EnableProvider(TRACEHANDLE session, const GUID& provider, ULONGLONG keyword
     ULONG status = EnableTraceEx2(session, &provider, EVENT_CONTROL_CODE_ENABLE_PROVIDER, level, keywords, 0, 5000, &parameters);
     if (status != ERROR_SUCCESS)
     {
-        printf("EnableTraceEx2(%s) failed: %lu\n", name, status);
+        if (status == ERROR_TIMEOUT)
+            printf("EnableTraceEx2(%s) timed out (%lu): a process using that provider did not respond in time.\n"
+                   "Retry, or close other D3D12 apps (browsers, streaming tools) and retry.\n", name, status);
+        else
+            printf("EnableTraceEx2(%s) failed: %lu\n", name, status);
         return false;
     }
 
