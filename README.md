@@ -42,7 +42,8 @@ In one console:
 dxtcl_monitor.exe vramtiming.exe
 ```
 
-then in another console:
+then start vramtiming, e.g. from another console (it opens its own console window for its log, or with
+`-fullscreen` writes only `vramtiming.log` in its working directory):
 
 ```
 vramtiming.exe 10 6144d 6144
@@ -65,7 +66,8 @@ See vramtiming's README for the full command line.
 `dxtcl_monitor` waits until a process named `vramtiming.exe` runs (the name is compared without
 folder and case, `.exe` is optional), starts the ETW session for it and prints one line every second
 until the target exits (close the vramtiming window) or Ctrl+C. vramtiming waits 2 seconds at startup,
-so the session is up before it creates anything. Compare the two consoles: vramtiming's lines say
+so the session is up before it creates anything. Compare the two consoles (in windowed mode; with
+`-fullscreen`, vramtiming's `vramtiming.log`): vramtiming's lines say
 `block ... | alloc ... | vram(fast) ...`, the monitor's lines say `RT vram ...`.
 
 `dxtcl_monitor.exe --pid <pid>` attaches to a running process directly. When the monitor attaches to
