@@ -78,7 +78,9 @@ rundown.
 
 Excerpts from one run of `vramtiming.exe 10 6144d 6144` on an RTX 3060 12 GB. The two programs' `t=` clocks are offset (here by about 9 s), so match them by events, not by time.
 
-vramtiming (from GPU timing), right after block A was freed and ~11 s later when B has been promoted:
+vramtiming (from GPU timing), right after block A was freed and ~11 s later when B has been promoted
+(this run is from when vramtiming still named its render targets `RT_<n>`; they are now `<block letter>_<n>`,
+e.g. `B_384..767`):
 
 ```
 t=11s  block B RT_384..767 | alloc 6144 MB | vram(fast) 2240MB/140 | sys(slow) 3904MB/244 | evicted(kernel) 3104MB | frame 1296.2 ms
@@ -95,8 +97,8 @@ t=30s  RT vram 2336MB/146 sys 3808MB/238 unk 0MB/0 dem 3712MB/232 | ctr vramRes 
 | Field | Meaning |
 |---|---|
 | `t=5s` | seconds since the monitor attached; `final` for the report after the target exited |
-| `RT vram / sys / unk <MB>MB/<n>` | live objects named `RT_<index>`, size and count, by the memory segment group the library last reported for them (`ObjectPlacementInfo::ResidentSegmentGroup` at creation, updated by `OnAllocationSegmentGroupChanges`): `Local`, `NonLocal`, `Unknown` |
-| `dem <MB>MB/<n>` | `RT_<index>` objects named by `OnDemotedAllocations` at least once |
+| `RT vram / sys / unk <MB>MB/<n>` | live render targets of vramtiming (objects named `<A-Z>_<digits>`, e.g. `A_0`, `B_384`), size and count, by the memory segment group the library last reported for them (`ObjectPlacementInfo::ResidentSegmentGroup` at creation, updated by `OnAllocationSegmentGroupChanges`): `Local`, `NonLocal`, `Unknown` |
+| `dem <MB>MB/<n>` | render targets (`<A-Z>_<digits>`) named by `OnDemotedAllocations` at least once |
 | `ctr vramRes / sysRes / dem` | the library's per-process memory counters (`PixCounterCallbacks`), latest values in MB: `Local Resident`, `Non-Local Resident`, and the sum of the five demoted-per-priority counters (`Minimum Priority` .. `Maximum Priority`); `-` until the library has reported one |
 | `pgIn / pgOut` | `PageIn` / `PageOut` residency operations (`OnResidencyOperation`) reported so far |
 | `segChg` | segment-group changes (`OnAllocationSegmentGroupChanges`) reported so far |

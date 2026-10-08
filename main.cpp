@@ -5,9 +5,10 @@
 //
 // Waits until a process with that exe name runs (or takes the given pid), starts a real-time ETW
 // session that feeds the library (etw_session.cpp), and once per second prints one line of what the
-// library's callbacks have reported so far: for the objects named RT_<index>, whether the library
-// has them in video memory (Local), in system memory (NonLocal) or doesn't know (Unknown), and
-// whether OnDemotedAllocations has named them, plus a few counters (see README.md). vramtiming
+// library's callbacks have reported so far: for vramtiming's render targets (named
+// <block letter>_<index>, e.g. A_0, B_2), whether the library has them in video memory (Local), in
+// system memory (NonLocal) or doesn't know (Unknown), and whether OnDemotedAllocations has named
+// them, plus a few counters (see README.md). vramtiming
 // measures the same thing with GPU timing. Runs until the target exits (or Ctrl+C), then prints a
 // final report.
 
@@ -61,7 +62,7 @@ public:
     UINT64 pageIns = 0, pageOuts = 0;                  // PageIn / PageOut residency operations so far
     UINT64 segmentGroupChanges = 0;
 
-    // ---- ApiObjectCallbacks: resources (vramtiming's RT_<index> objects are committed resources) ----
+    // ---- ApiObjectCallbacks: resources (vramtiming's <block letter>_<index> render targets are committed resources) ----
 
     HRESULT OnCommittedResourceCreation(INT64 time, UINT64 device, UINT32 pid, UINT32 tid, const D3D12_RESOURCE_DESC* desc,
         const ObjectPlacementInfo* placement, const D3D12_HEAP_PROPERTIES* heapProperties, D3D12_HEAP_FLAGS heapFlags,
@@ -191,10 +192,11 @@ private:
 
 UINT64 MiB(UINT64 bytes) { return bytes >> 20; } // "MB" in the output means MiB, as in vramtiming
 
-// True for "RT_<digits>" (vramtiming's render targets), false for any other name.
+// True for "<A-Z>_<digits>" (vramtiming's render targets, e.g. A_0, B_2), false for any other name.
 bool IsRtName(const std::wstring& name)
 {
-    return name.size() > 3 && name.compare(0, 3, L"RT_") == 0 && name.find_first_not_of(L"0123456789", 3) == std::wstring::npos;
+    return name.size() > 2 && name[0] >= L'A' && name[0] <= L'Z' && name[1] == L'_' &&
+        name.find_first_not_of(L"0123456789", 2) == std::wstring::npos;
 }
 
 // Sum of the named counters in MiB (the library reports MB = 10^6 bytes), or "-" if none was reported yet.
